@@ -26,5 +26,6 @@ tag-prefix = "v"
 allow_failure = false
 
 [dependencies]
-failure = "0.1.1"
-failure_derive = "0.1.1"
+futures = "0.1.25"
+ratelimit_meter = "4.0.1"
+futures-timer = "0.1.1"
