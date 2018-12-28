@@ -3,16 +3,16 @@ use futures_timer::Delay;
 use ratelimit_meter::{algorithms::Algorithm, DirectRateLimiter, NonConformance};
 use std::io;
 
-pub struct Ratelimit<A: Algorithm>
+pub struct Ratelimit<'a, A: Algorithm>
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
 {
     delay: Delay,
-    limiter: DirectRateLimiter<A>,
+    limiter: &'a mut DirectRateLimiter<A>,
     first_time: bool,
 }
 
-impl<A: Algorithm> Ratelimit<A>
+impl<'a, A: Algorithm> Ratelimit<'a, A>
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
 {
@@ -21,7 +21,8 @@ where
         match self.limiter.check() {
             Ok(()) => Ok(()),
             Err(nc) => {
-                self.delay.reset_at(nc.earliest_possible());
+                let earliest = nc.earliest_possible();
+                self.delay.reset_at(earliest);
                 Err(())
             }
         }
@@ -29,7 +30,7 @@ where
 
     /// Creates a new future that resolves successfully as soon as the
     /// rate limiter allows it.
-    pub fn new(limiter: DirectRateLimiter<A>) -> Self {
+    pub fn new(limiter: &'a mut DirectRateLimiter<A>) -> Self {
         Ratelimit {
             delay: Delay::new(Default::default()),
             first_time: true,
@@ -38,7 +39,7 @@ where
     }
 }
 
-impl<A: Algorithm> Future for Ratelimit<A>
+impl<'a, A: Algorithm> Future for Ratelimit<'a, A>
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
 {
@@ -50,9 +51,11 @@ where
             // First time we run, let's check the rate-limiter and set
             // up a delay if we can't proceed:
             self.first_time = false;
-            return match self.check() {
-                Ok(_) => Ok(Async::Ready(())),
-                Err(_) => Ok(Async::NotReady),
+            match self.check() {
+                Ok(_) => {
+                    return Ok(Async::Ready(()));
+                }
+                Err(_) => {}
             };
         }
         match self.delay.poll() {
@@ -60,7 +63,10 @@ where
             // it and reset the delay otherwise.
             Ok(Async::Ready(_)) => match self.check() {
                 Ok(_) => Ok(Async::Ready(())),
-                Err(_) => Ok(Async::NotReady),
+                Err(_) => {
+                    self.delay.poll()?;
+                    Ok(Async::NotReady)
+                }
             },
 
             // timer isn't yet ready, let's wait:

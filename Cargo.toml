@@ -29,3 +29,4 @@ allow_failure = false
 futures = "0.1.25"
 ratelimit_meter = "4.0.1"
 futures-timer = "0.1.1"
+nonzero_ext = "0.1.2"
