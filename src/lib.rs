@@ -1,8 +1,39 @@
+//! Rate-limiting for futures.
+//!
+//! This crate hooks the
+//! [ratelimit_meter](https://crates.io/crates/ratelimit_meter) crate up
+//! to futures v0.1 (the same version supported by Tokio right now).
+//!
+//! # Usage & mechanics of rate limiting with futures
+//!
+//! To use this crate's Future type, use the provided `Ratelimit::new`
+//! function. It takes a direct rate limiter (an in-memory rate limiter
+//! implementation), and returns a Future that can be chained to the
+//! actual work that you mean to perform:
+//!
+//! ```rust
+//! # extern crate ratelimit_meter;
+//! # extern crate ratelimit_futures;
+//! # extern crate futures;
+//! use futures::prelude::*;
+//! use futures::future::{self, FutureResult};
+//! use ratelimit_meter::{DirectRateLimiter, LeakyBucket};
+//! use ratelimit_futures::Ratelimit;
+//! use std::num::NonZeroU32;
+//!
+//! let mut lim = DirectRateLimiter::<LeakyBucket>::per_second(NonZeroU32::new(1).unwrap());
+//! let ratelimit_future = Ratelimit::new(&mut lim);
+//! let future_of_3 = ratelimit_future.and_then(|_| {
+//! Ok(3)
+//! });
+//! ```
+
 use futures::{Async, Future, Poll};
 use futures_timer::Delay;
 use ratelimit_meter::{algorithms::Algorithm, DirectRateLimiter, NonConformance};
 use std::io;
 
+/// The rate-limiter as a future.
 pub struct Ratelimit<'a, A: Algorithm>
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
