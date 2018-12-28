@@ -24,6 +24,7 @@ tag-prefix = "v"
 
 [package.metadata.template_ci.clippy]
 allow_failure = false
+version = "stable"
 
 [dependencies]
 futures = "0.1.25"
