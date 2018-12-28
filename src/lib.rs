@@ -108,12 +108,9 @@ where
             // First time we run, let's check the rate-limiter and set
             // up a delay if we can't proceed:
             self.first_time = false;
-            match self.check() {
-                Ok(_) => {
-                    return Ok(Async::Ready(()));
-                }
-                Err(_) => {}
-            };
+            if self.check().is_ok() {
+                return Ok(Async::Ready(()));
+            }
         }
         match self.delay.poll() {
             // Timer says we should check the rate-limiter again, do
