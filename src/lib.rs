@@ -22,11 +22,37 @@
 //! use std::num::NonZeroU32;
 //!
 //! let mut lim = DirectRateLimiter::<LeakyBucket>::per_second(NonZeroU32::new(1).unwrap());
-//! let ratelimit_future = Ratelimit::new(&mut lim);
-//! let future_of_3 = ratelimit_future.and_then(|_| {
-//! Ok(3)
-//! });
+//! {
+//!     let mut lim = lim.clone();
+//!     let ratelimit_future = Ratelimit::new(&mut lim);
+//!     let future_of_3 = ratelimit_future.and_then(|_| {
+//!         Ok(3)
+//!     });
+//! }
+//! {
+//!     let mut lim = lim.clone();
+//!     let ratelimit_future = Ratelimit::new(&mut lim);
+//!     let future_of_4 = ratelimit_future.and_then(|_| {
+//!         Ok(4)
+//!     });
+//! }
+//! // 1 second will pass before both futures resolve.
 //! ```
+//!
+//! In this example, we're constructing futures that can each start work
+//! only once the (shared) rate limiter says that it's ok to start.
+//!
+//! You can probably guess the mechanics of using these rate-limiting
+//! futures:
+//!
+//! * Chain your work to them using `.and_then`.
+//! * Construct and a single rate limiter for the work that needs to count
+//!   against that rate limit. You can share them using their `Clone`
+//!   trait.
+//! * Rate-limiting futures will wait as long as it takes to arrive at a
+//!   point where code is allowed to proceed. If the shared rate limiter
+//!   already allowed another piece of code to proceed, the wait time will
+//!   be extended.
 
 use futures::{Async, Future, Poll};
 use futures_timer::Delay;
