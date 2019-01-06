@@ -10,7 +10,7 @@ description = "Rate-limit requests using futures"
 documentation = "https://docs.rs/ratelimit_futures"
 
 [badges]
-travis-ci = { repository = "antifuchs/ratelimit_futures", branch = "master" }
+circle-ci = { repository = "antifuchs/ratelimit_futures", branch = "master" }
 maintenance = { status = "passively-maintained" }
 
 [package.metadata.release]
@@ -21,10 +21,6 @@ pro-release-commit-message = "Start next development iteration {{version}}"
 tag-message = "Release {{prefix}}{{version}}"
 dev-version-ext = "dev"
 tag-prefix = "v"
-
-[package.metadata.template_ci.clippy]
-allow_failure = false
-version = "stable"
 
 [dependencies]
 futures = "0.1.25"
