@@ -17,7 +17,7 @@ fn pauses() {
         }
     }
 
-    let rl = Ratelimit::new(&mut lim);
+    let rl = Ratelimit::new(lim);
     rl.wait().unwrap();
     assert!(i.elapsed() > Duration::from_millis(100));
 }
@@ -25,8 +25,8 @@ fn pauses() {
 #[test]
 fn proceeds() {
     let i = Instant::now();
-    let mut lim = DirectRateLimiter::<LeakyBucket>::per_second(nonzero!(10u32));
-    let rl = Ratelimit::new(&mut lim);
+    let lim = DirectRateLimiter::<LeakyBucket>::per_second(nonzero!(10u32));
+    let rl = Ratelimit::new(lim);
     rl.wait().unwrap();
     assert!(i.elapsed() <= Duration::from_millis(100));
 }
@@ -38,9 +38,9 @@ fn multiple() {
     let mut children = vec![];
 
     for _i in 0..20 {
-        let mut lim = lim.clone();
+        let lim = lim.clone();
         children.push(thread::spawn(move || {
-            let rl = Ratelimit::new(&mut lim);
+            let rl = Ratelimit::new(lim);
             rl.wait().unwrap();
         }));
     }

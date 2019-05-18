@@ -23,15 +23,13 @@
 //!
 //! let mut lim = DirectRateLimiter::<LeakyBucket>::per_second(NonZeroU32::new(1).unwrap());
 //! {
-//!     let mut lim = lim.clone();
-//!     let ratelimit_future = Ratelimit::new(&mut lim);
+//!     let ratelimit_future = Ratelimit::new(lim.clone());
 //!     let future_of_3 = ratelimit_future.and_then(|_| {
 //!         Ok(3)
 //!     });
 //! }
 //! {
-//!     let mut lim = lim.clone();
-//!     let ratelimit_future = Ratelimit::new(&mut lim);
+//!     let ratelimit_future = Ratelimit::new(lim.clone());
 //!     let future_of_4 = ratelimit_future.and_then(|_| {
 //!         Ok(4)
 //!     });
@@ -60,16 +58,16 @@ use ratelimit_meter::{algorithms::Algorithm, DirectRateLimiter, NonConformance};
 use std::io;
 
 /// The rate-limiter as a future.
-pub struct Ratelimit<'a, A: Algorithm>
+pub struct Ratelimit<A: Algorithm>
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
 {
     delay: Delay,
-    limiter: &'a mut DirectRateLimiter<A>,
+    limiter: DirectRateLimiter<A>,
     first_time: bool,
 }
 
-impl<'a, A: Algorithm> Ratelimit<'a, A>
+impl<A: Algorithm> Ratelimit<A>
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
 {
@@ -87,7 +85,7 @@ where
 
     /// Creates a new future that resolves successfully as soon as the
     /// rate limiter allows it.
-    pub fn new(limiter: &'a mut DirectRateLimiter<A>) -> Self {
+    pub fn new(limiter: DirectRateLimiter<A>) -> Self {
         Ratelimit {
             delay: Delay::new(Default::default()),
             first_time: true,
@@ -96,7 +94,7 @@ where
     }
 }
 
-impl<'a, A: Algorithm> Future for Ratelimit<'a, A>
+impl<A: Algorithm> Future for Ratelimit<A>
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
 {
