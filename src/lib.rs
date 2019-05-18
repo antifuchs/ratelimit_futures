@@ -57,6 +57,9 @@ use futures_timer::Delay;
 use ratelimit_meter::{algorithms::Algorithm, DirectRateLimiter, NonConformance};
 use std::io;
 
+pub mod sink;
+pub mod stream;
+
 /// The rate-limiter as a future.
 pub struct Ratelimit<A: Algorithm>
 where
@@ -91,6 +94,15 @@ where
             first_time: true,
             limiter,
         }
+    }
+
+    /// Reset this future (but not the underlying rate-limiter) to its initial state.
+    ///
+    /// This allows re-using the same future to rate-limit multiple items.
+    /// Calling this method should be semantically equivalent to replacing this `Ratelimit`
+    /// with a newly created `Ratelimit` using the same limiter.
+    pub fn restart(&mut self) {
+        self.first_time = true;
     }
 }
 
