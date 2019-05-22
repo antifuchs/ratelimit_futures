@@ -6,10 +6,13 @@ use ratelimit_meter::{algorithms::Algorithm, DirectRateLimiter, NonConformance};
 use std::io;
 
 pub trait StreamExt: Stream {
-    /// Limits the rate at which the current stream produces items.
+    /// Limits the rate at which the stream produces items.
     ///
-    /// Note that this combinator does not buffer any items internally but
-    /// instead limits `poll` calls to the underlying stream.
+    /// Note that this combinator limits the rate at which it yields
+    /// items, not necessarily the rate at which the underlying stream is polled.
+    /// The combinator will buffer at most one item in order to adhere to the
+    /// given limiter. I.e. if it already has an item buffered and needs to wait
+    /// it will not `poll` the underlying stream.
     fn ratelimit<A: Algorithm>(self, limiter: DirectRateLimiter<A>) -> Ratelimited<Self, A>
     where
         Self: Sized,
@@ -25,7 +28,7 @@ impl<S: Stream> StreamExt for S {
         Ratelimited {
             inner: self,
             ratelimit: Ratelimit::new(limiter),
-            check_limit: true,
+            buf: None,
         }
     }
 }
@@ -39,7 +42,7 @@ where
 {
     inner: S,
     ratelimit: Ratelimit<A>,
-    check_limit: bool,
+    buf: Option<S::Item>,
 }
 
 impl<S: Stream, A: Algorithm> Ratelimited<S, A>
@@ -56,9 +59,11 @@ where
         &mut self.inner
     }
 
-    /// Consumes this combinator, returning the underlying stream.
-    pub fn into_inner(self) -> S {
-        self.inner
+    /// Consumes this combinator, returning the underlying stream and any item
+    /// which it has already produced but which is still being held back
+    /// in order to abide by the limiter.
+    pub fn into_inner(self) -> (S, Option<S::Item>) {
+        (self.inner, self.buf)
     }
 }
 
@@ -71,20 +76,24 @@ where
     type Error = S::Error;
 
     fn poll(&mut self) -> Poll<Option<S::Item>, S::Error> {
-        if self.check_limit {
-            // Wait until we're good to go
-            try_ready!(self.ratelimit.poll());
-            self.check_limit = false;
+        // Unless we've already got an item in our buffer,
+        if self.buf.is_none() {
+            // poll the underlying stream for the next one
+            self.buf = try_ready!(self.inner.poll());
         }
 
-        // Poll for the next item
-        let result = try_ready!(self.inner.poll());
+        if self.buf.is_none() {
+            // End of stream, no need to query the limiter
+            return Ok(Async::Ready(None));
+        }
 
-        // Once we have produced an item, start checking the limit again
+        // Wait until we're good to go
+        try_ready!(self.ratelimit.poll());
+
+        // Once we have produced an item, reset the limiter future
         self.ratelimit.restart();
-        self.check_limit = true;
 
-        Ok(Async::Ready(result))
+        Ok(Async::Ready(self.buf.take()))
     }
 }
 
