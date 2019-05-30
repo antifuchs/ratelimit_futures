@@ -49,12 +49,12 @@ impl<S: Stream, A: Algorithm> Ratelimited<S, A>
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
 {
-    /// Acquires a references to the underlying stream that this combinator is pulling from.
+    /// Acquires a reference to the underlying stream that this combinator is pulling from.
     pub fn get_ref(&self) -> &S {
         &self.inner
     }
 
-    /// Acquires a mutable references to the underlying stream that this combinator is pulling from.
+    /// Acquires a mutable reference to the underlying stream that this combinator is pulling from.
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.inner
     }

@@ -50,12 +50,12 @@ impl<S: Sink, A: Algorithm> Ratelimited<S, A>
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
 {
-    /// Acquires a references to the underlying sink that this combinator is pushing to.
+    /// Acquires a reference to the underlying sink that this combinator is pushing to.
     pub fn get_ref(&self) -> &S {
         &self.inner
     }
 
-    /// Acquires a mutable references to the underlying sink that this combinator is pushing to.
+    /// Acquires a mutable reference to the underlying sink that this combinator is pushing to.
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.inner
     }
