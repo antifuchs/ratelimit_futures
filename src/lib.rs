@@ -23,15 +23,13 @@
 //!
 //! let mut lim = DirectRateLimiter::<LeakyBucket>::per_second(NonZeroU32::new(1).unwrap());
 //! {
-//!     let mut lim = lim.clone();
-//!     let ratelimit_future = Ratelimit::new(&mut lim);
+//!     let ratelimit_future = Ratelimit::new(lim.clone());
 //!     let future_of_3 = ratelimit_future.and_then(|_| {
 //!         Ok(3)
 //!     });
 //! }
 //! {
-//!     let mut lim = lim.clone();
-//!     let ratelimit_future = Ratelimit::new(&mut lim);
+//!     let ratelimit_future = Ratelimit::new(lim.clone());
 //!     let future_of_4 = ratelimit_future.and_then(|_| {
 //!         Ok(4)
 //!     });
@@ -59,17 +57,20 @@ use futures_timer::Delay;
 use ratelimit_meter::{algorithms::Algorithm, DirectRateLimiter, NonConformance};
 use std::io;
 
+pub mod sink;
+pub mod stream;
+
 /// The rate-limiter as a future.
-pub struct Ratelimit<'a, A: Algorithm>
+pub struct Ratelimit<A: Algorithm>
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
 {
     delay: Delay,
-    limiter: &'a mut DirectRateLimiter<A>,
+    limiter: DirectRateLimiter<A>,
     first_time: bool,
 }
 
-impl<'a, A: Algorithm> Ratelimit<'a, A>
+impl<A: Algorithm> Ratelimit<A>
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
 {
@@ -87,16 +88,25 @@ where
 
     /// Creates a new future that resolves successfully as soon as the
     /// rate limiter allows it.
-    pub fn new(limiter: &'a mut DirectRateLimiter<A>) -> Self {
+    pub fn new(limiter: DirectRateLimiter<A>) -> Self {
         Ratelimit {
             delay: Delay::new(Default::default()),
             first_time: true,
             limiter,
         }
     }
+
+    /// Reset this future (but not the underlying rate-limiter) to its initial state.
+    ///
+    /// This allows re-using the same future to rate-limit multiple items.
+    /// Calling this method should be semantically equivalent to replacing this `Ratelimit`
+    /// with a newly created `Ratelimit` using the same limiter.
+    pub fn restart(&mut self) {
+        self.first_time = true;
+    }
 }
 
-impl<'a, A: Algorithm> Future for Ratelimit<'a, A>
+impl<A: Algorithm> Future for Ratelimit<A>
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
 {
