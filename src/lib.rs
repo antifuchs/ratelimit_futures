@@ -14,7 +14,6 @@
 //! ```rust
 //! # extern crate ratelimit_meter;
 //! # extern crate ratelimit_futures;
-//! # extern crate futures;
 //! use futures::prelude::*;
 //! use futures::future::{self, FutureResult};
 //! use ratelimit_meter::{DirectRateLimiter, LeakyBucket};
@@ -52,18 +51,21 @@
 //!   already allowed another piece of code to proceed, the wait time will
 //!   be extended.
 
-use futures::{Async, Future, Poll};
 use futures_timer::Delay;
 use ratelimit_meter::{algorithms::Algorithm, DirectRateLimiter, NonConformance};
-use std::io;
+use std::future::Future;
+use std::pin::Pin;
+use std::marker::Unpin;
+use std::task::Context;
+use std::task::Poll;
 
-pub mod sink;
-pub mod stream;
+//pub mod sink;
+//pub mod stream;
 
 /// The rate-limiter as a future.
 pub struct Ratelimit<A: Algorithm>
-where
-    <A as Algorithm>::NegativeDecision: NonConformance,
+    where
+        <A as Algorithm>::NegativeDecision: NonConformance,
 {
     delay: Delay,
     limiter: DirectRateLimiter<A>,
@@ -71,8 +73,8 @@ where
 }
 
 impl<A: Algorithm> Ratelimit<A>
-where
-    <A as Algorithm>::NegativeDecision: NonConformance,
+    where
+        <A as Algorithm>::NegativeDecision: NonConformance,
 {
     /// Check if the rate-limiter would allow a request through.
     fn check(&mut self) -> Result<(), ()> {
@@ -107,37 +109,41 @@ where
 }
 
 impl<A: Algorithm> Future for Ratelimit<A>
-where
-    <A as Algorithm>::NegativeDecision: NonConformance,
+    where
+        <A as Algorithm>::NegativeDecision: NonConformance,
+        A: Unpin,
+        <A as ratelimit_meter::algorithms::Algorithm>::BucketState: std::marker::Unpin
 {
-    type Item = ();
-    type Error = io::Error;
+    type Output = ();
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.first_time {
             // First time we run, let's check the rate-limiter and set
             // up a delay if we can't proceed:
-            self.first_time = false;
-            if self.check().is_ok() {
-                return Ok(Async::Ready(()));
+            (*self).first_time = false;
+            if (*self).check().is_ok() {
+                return Poll::Ready(());
             }
         }
-        match self.delay.poll() {
-            // Timer says we should check the rate-limiter again, do
-            // it and reset the delay otherwise.
-            Ok(Async::Ready(_)) => match self.check() {
-                Ok(_) => Ok(Async::Ready(())),
-                Err(_) => {
-                    self.delay.poll()?;
-                    Ok(Async::NotReady)
-                }
-            },
 
-            // timer isn't yet ready, let's wait:
-            Ok(Async::NotReady) => Ok(Async::NotReady),
+        let delay = Pin::new(&mut (*self).delay);
+        if delay.poll(cx).is_pending() {
+            // our timer hasn't expired yet, we have to wait some more:
+            return Poll::Pending;
+        }
 
-            // something went wrong:
-            Err(e) => Err(e),
+        // Re-check the rate-limiter to ensure we're allowed to go through:
+        if (*self).check().is_ok() {
+            return Poll::Ready(());
+        }
+
+        // Trigger a wait on the delay:
+        let delay = Pin::new(&mut (*self).delay);
+        match delay.poll(cx) {
+            Poll::Ready(Err(_)) => Poll::Pending,
+            Poll::Ready(_) => Poll::Ready(()),
+            _ => Poll::Pending,
         }
     }
 }
+
