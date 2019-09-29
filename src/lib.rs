@@ -15,7 +15,7 @@
 //! # extern crate ratelimit_meter;
 //! # extern crate ratelimit_futures;
 //! use futures::prelude::*;
-//! use futures::future::{self, FutureResult};
+//! use futures::future;
 //! use ratelimit_meter::{DirectRateLimiter, LeakyBucket};
 //! use ratelimit_futures::Ratelimit;
 //! use std::num::NonZeroU32;
@@ -23,15 +23,11 @@
 //! let mut lim = DirectRateLimiter::<LeakyBucket>::per_second(NonZeroU32::new(1).unwrap());
 //! {
 //!     let ratelimit_future = Ratelimit::new(lim.clone());
-//!     let future_of_3 = ratelimit_future.and_then(|_| {
-//!         Ok(3)
-//!     });
+//!     let future_of_3 = ratelimit_future.then(|_| { future::ready(3) });
 //! }
 //! {
 //!     let ratelimit_future = Ratelimit::new(lim.clone());
-//!     let future_of_4 = ratelimit_future.and_then(|_| {
-//!         Ok(4)
-//!     });
+//!     let future_of_4 = ratelimit_future.then(|_| { future::ready(4) });
 //! }
 //! // 1 second will pass before both futures resolve.
 //! ```
@@ -62,38 +58,31 @@ use std::task::Poll;
 //pub mod sink;
 //pub mod stream;
 
+enum LimiterState {
+    Check,
+    Delay,
+}
+
 /// The rate-limiter as a future.
 pub struct Ratelimit<A: Algorithm>
     where
         <A as Algorithm>::NegativeDecision: NonConformance,
 {
-    delay: Delay,
     limiter: DirectRateLimiter<A>,
-    first_time: bool,
+    state: LimiterState,
+    delay: Delay,
 }
 
 impl<A: Algorithm> Ratelimit<A>
     where
         <A as Algorithm>::NegativeDecision: NonConformance,
 {
-    /// Check if the rate-limiter would allow a request through.
-    fn check(&mut self) -> Result<(), ()> {
-        match self.limiter.check() {
-            Ok(()) => Ok(()),
-            Err(nc) => {
-                let earliest = nc.earliest_possible();
-                self.delay.reset_at(earliest);
-                Err(())
-            }
-        }
-    }
-
     /// Creates a new future that resolves successfully as soon as the
     /// rate limiter allows it.
     pub fn new(limiter: DirectRateLimiter<A>) -> Self {
         Ratelimit {
+            state: LimiterState::Check,
             delay: Delay::new(Default::default()),
-            first_time: true,
             limiter,
         }
     }
@@ -104,7 +93,7 @@ impl<A: Algorithm> Ratelimit<A>
     /// Calling this method should be semantically equivalent to replacing this `Ratelimit`
     /// with a newly created `Ratelimit` using the same limiter.
     pub fn restart(&mut self) {
-        self.first_time = true;
+        self.state = LimiterState::Check;
     }
 }
 
@@ -117,32 +106,25 @@ impl<A: Algorithm> Future for Ratelimit<A>
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.first_time {
-            // First time we run, let's check the rate-limiter and set
-            // up a delay if we can't proceed:
-            (*self).first_time = false;
-            if (*self).check().is_ok() {
-                return Poll::Ready(());
+        loop {
+            match self.state {
+                LimiterState::Check => {
+                    if let Err(nc) = self.limiter.check() {
+                        self.state = LimiterState::Delay;
+                        // TODO: jitter.
+                        self.delay.reset_at(nc.earliest_possible());
+                    } else {
+                        return Poll::Ready(());
+                    }
+                },
+                LimiterState::Delay => {
+                    let delay = Pin::new(&mut self.delay);
+                    match delay.poll(cx) {
+                        Poll::Ready(_) => { self.state = LimiterState::Check },
+                        Poll::Pending => { return Poll::Pending; }
+                    }
+                },
             }
-        }
-
-        let delay = Pin::new(&mut (*self).delay);
-        if delay.poll(cx).is_pending() {
-            // our timer hasn't expired yet, we have to wait some more:
-            return Poll::Pending;
-        }
-
-        // Re-check the rate-limiter to ensure we're allowed to go through:
-        if (*self).check().is_ok() {
-            return Poll::Ready(());
-        }
-
-        // Trigger a wait on the delay:
-        let delay = Pin::new(&mut (*self).delay);
-        match delay.poll(cx) {
-            Poll::Ready(Err(_)) => Poll::Pending,
-            Poll::Ready(_) => Poll::Ready(()),
-            _ => Poll::Pending,
         }
     }
 }
