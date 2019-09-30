@@ -50,13 +50,17 @@
 use futures_timer::Delay;
 use ratelimit_meter::{algorithms::Algorithm, DirectRateLimiter, NonConformance};
 use std::future::Future;
-use std::pin::Pin;
 use std::marker::Unpin;
+use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
+use std::time::Duration;
 
+mod jitter;
 //pub mod sink;
 //pub mod stream;
+
+pub use jitter::*;
 
 enum LimiterState {
     Check,
@@ -65,17 +69,18 @@ enum LimiterState {
 
 /// The rate-limiter as a future.
 pub struct Ratelimit<A: Algorithm>
-    where
-        <A as Algorithm>::NegativeDecision: NonConformance,
+where
+    <A as Algorithm>::NegativeDecision: NonConformance,
 {
     limiter: DirectRateLimiter<A>,
     state: LimiterState,
     delay: Delay,
+    jitter: Option<jitter::Jitter>,
 }
 
 impl<A: Algorithm> Ratelimit<A>
-    where
-        <A as Algorithm>::NegativeDecision: NonConformance,
+where
+    <A as Algorithm>::NegativeDecision: NonConformance,
 {
     /// Creates a new future that resolves successfully as soon as the
     /// rate limiter allows it.
@@ -83,6 +88,17 @@ impl<A: Algorithm> Ratelimit<A>
         Ratelimit {
             state: LimiterState::Check,
             delay: Delay::new(Default::default()),
+            jitter: None,
+            limiter,
+        }
+    }
+
+    pub fn new_with_jitter(limiter: DirectRateLimiter<A>, jitter: Jitter) -> Self {
+        let jitter = Some(jitter);
+        Ratelimit {
+            state: LimiterState::Check,
+            delay: Delay::new(Default::default()),
+            jitter,
             limiter,
         }
     }
@@ -98,10 +114,10 @@ impl<A: Algorithm> Ratelimit<A>
 }
 
 impl<A: Algorithm> Future for Ratelimit<A>
-    where
-        <A as Algorithm>::NegativeDecision: NonConformance,
-        A: Unpin,
-        <A as ratelimit_meter::algorithms::Algorithm>::BucketState: std::marker::Unpin
+where
+    <A as Algorithm>::NegativeDecision: NonConformance,
+    A: Unpin,
+    <A as ratelimit_meter::algorithms::Algorithm>::BucketState: std::marker::Unpin,
 {
     type Output = ();
 
@@ -111,21 +127,26 @@ impl<A: Algorithm> Future for Ratelimit<A>
                 LimiterState::Check => {
                     if let Err(nc) = self.limiter.check() {
                         self.state = LimiterState::Delay;
-                        // TODO: jitter.
-                        self.delay.reset_at(nc.earliest_possible());
+                        let jitter = self
+                            .jitter
+                            .as_ref()
+                            .and_then(|j| Some(j.get()))
+                            .unwrap_or_else(|| Duration::new(0, 0));
+                        self.delay.reset_at(nc.earliest_possible() + jitter);
                     } else {
                         return Poll::Ready(());
                     }
-                },
+                }
                 LimiterState::Delay => {
                     let delay = Pin::new(&mut self.delay);
                     match delay.poll(cx) {
-                        Poll::Ready(_) => { self.state = LimiterState::Check },
-                        Poll::Pending => { return Poll::Pending; }
+                        Poll::Ready(_) => self.state = LimiterState::Check,
+                        Poll::Pending => {
+                            return Poll::Pending;
+                        }
                     }
-                },
+                }
             }
         }
     }
 }
-

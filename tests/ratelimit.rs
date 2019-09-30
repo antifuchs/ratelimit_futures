@@ -3,12 +3,12 @@ use futures::stream;
 use nonzero_ext::nonzero;
 //use ratelimit_futures::sink::SinkExt;
 //use ratelimit_futures::stream::StreamExt;
-use ratelimit_futures::Ratelimit;
+use futures::executor::block_on;
+use ratelimit_futures::{Jitter, Ratelimit};
 use ratelimit_meter::{DirectRateLimiter, LeakyBucket};
 use std::io;
 use std::thread;
 use std::time::{Duration, Instant};
-use futures::executor::block_on;
 
 #[test]
 fn pauses() {
@@ -61,6 +61,31 @@ fn multiple() {
         elapsed
     );
 }
+
+#[test]
+fn jitters() {
+    let i = Instant::now();
+    let mut lim = DirectRateLimiter::<LeakyBucket>::per_second(nonzero!(10u32));
+
+    // exhaust the limiter:
+    loop {
+        if lim.check().is_err() {
+            break;
+        }
+    }
+
+    let jitter = Jitter::new(Duration::from_millis(20), Duration::from_millis(90));
+    let rl = Ratelimit::new_with_jitter(lim, jitter);
+    block_on(rl);
+    assert!(i.elapsed() >= Duration::from_millis(120));
+    assert!(
+        i.elapsed()
+            <= Duration::from_millis(210) +
+        // some slack to account for any test runner fuzziness:
+        Duration::from_millis(10)
+    );
+}
+
 /*
 #[test]
 fn stream() {
