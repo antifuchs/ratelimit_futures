@@ -48,7 +48,7 @@
 //!   be extended.
 
 use futures_timer::Delay;
-use ratelimit_meter::{algorithms::Algorithm, DirectRateLimiter, NonConformance};
+use ratelimit_meter::{algorithms::Algorithm, clock, DirectRateLimiter, NonConformance};
 use std::future::Future;
 use std::marker::Unpin;
 use std::pin::Pin;
@@ -68,23 +68,23 @@ enum LimiterState {
 }
 
 /// The rate-limiter as a future.
-pub struct Ratelimit<A: Algorithm>
+pub struct Ratelimit<A: Algorithm<C::Instant>, C: clock::Clock = clock::DefaultClock>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance,
+    <A as Algorithm<C::Instant>>::NegativeDecision: NonConformance,
 {
-    limiter: DirectRateLimiter<A>,
+    limiter: DirectRateLimiter<A, C>,
     state: LimiterState,
     delay: Delay,
     jitter: Option<jitter::Jitter>,
 }
 
-impl<A: Algorithm> Ratelimit<A>
+impl<A: Algorithm<C::Instant>, C: clock::Clock> Ratelimit<A, C>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance,
+    <A as Algorithm<C::Instant>>::NegativeDecision: NonConformance,
 {
     /// Creates a new future that resolves successfully as soon as the
     /// rate limiter allows it.
-    pub fn new(limiter: DirectRateLimiter<A>) -> Self {
+    pub fn new(limiter: DirectRateLimiter<A, C>) -> Self {
         Ratelimit {
             state: LimiterState::Check,
             delay: Delay::new(Default::default()),
@@ -93,7 +93,7 @@ where
         }
     }
 
-    pub fn new_with_jitter(limiter: DirectRateLimiter<A>, jitter: Jitter) -> Self {
+    pub fn new_with_jitter(limiter: DirectRateLimiter<A, C>, jitter: Jitter) -> Self {
         let jitter = Some(jitter);
         Ratelimit {
             state: LimiterState::Check,
@@ -113,11 +113,12 @@ where
     }
 }
 
-impl<A: Algorithm> Future for Ratelimit<A>
+impl<A: Algorithm<C::Instant>, C: clock::Clock> Future for Ratelimit<A, C>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance,
+    <A as Algorithm<C::Instant>>::NegativeDecision: NonConformance,
     A: Unpin,
-    <A as ratelimit_meter::algorithms::Algorithm>::BucketState: std::marker::Unpin,
+    C: Unpin,
+    <A as ratelimit_meter::algorithms::Algorithm<C::Instant>>::BucketState: std::marker::Unpin,
 {
     type Output = ();
 
