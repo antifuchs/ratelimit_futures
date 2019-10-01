@@ -1,11 +1,18 @@
 //! Rate-limiting combinator for sinks.
 
 use crate::Ratelimit;
-use futures::{Async, AsyncSink, Future, Poll, Sink, StartSend, Stream};
-use ratelimit_meter::{algorithms::Algorithm, DirectRateLimiter, NonConformance};
-use std::io;
+use futures::sink::Sink;
+use ratelimit_meter::{algorithms::Algorithm, clock, DirectRateLimiter, NonConformance};
+use std::future::Future;
+use std::marker::PhantomData;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Instant;
 
-pub trait SinkExt: Sink {
+pub trait SinkExt<Item, S>: Sink<Item>
+where
+    S: Sink<Item>,
+{
     /// Limits the rate at which items can be put into the current sink.
     ///
     /// Note that this combinator limits the rate at which it accepts items,
@@ -14,117 +21,132 @@ pub trait SinkExt: Sink {
     /// given limiter. I.e. if it already has an item buffered and needs to
     /// wait, it will not accept any more items until the underlying stream has
     /// accepted the current item.
-    fn sink_ratelimit<A: Algorithm>(self, limiter: DirectRateLimiter<A>) -> Ratelimited<Self, A>
+    fn sink_ratelimit<A: Algorithm<Instant>>(
+        self,
+        limiter: DirectRateLimiter<A, clock::MonotonicClock>,
+    ) -> RatelimitedSink<Item, S, A>
     where
         Self: Sized,
-        <A as Algorithm>::NegativeDecision: NonConformance;
+        <A as Algorithm>::NegativeDecision: NonConformance<Instant>;
 }
 
-impl<S: Sink> SinkExt for S {
-    fn sink_ratelimit<A: Algorithm>(self, limiter: DirectRateLimiter<A>) -> Ratelimited<Self, A>
+impl<Item, S: Sink<Item>> SinkExt<Item, S> for S {
+    fn sink_ratelimit<A: Algorithm<Instant>>(
+        self,
+        limiter: DirectRateLimiter<A, clock::MonotonicClock>,
+    ) -> RatelimitedSink<Item, S, A>
     where
         Self: Sized,
-        <A as Algorithm>::NegativeDecision: NonConformance,
+        <A as Algorithm<Instant>>::NegativeDecision: NonConformance<Instant>,
     {
-        Ratelimited {
-            inner: self,
-            ratelimit: Ratelimit::new(limiter),
-            buf: None,
-        }
+        RatelimitedSink::new(self, limiter)
     }
 }
 
-/// A sink combinator which will limit the rate of items passing through.
-///
-/// This is produced by the [SinkExt::sink_ratelimit] methods.
-pub struct Ratelimited<S: Sink, A: Algorithm>
-where
-    <A as Algorithm>::NegativeDecision: NonConformance,
-{
-    inner: S,
-    ratelimit: Ratelimit<A>,
-    buf: Option<S::SinkItem>,
+#[derive(PartialEq, Debug)]
+enum State {
+    NotReady,
+    Ready,
 }
 
-impl<S: Sink, A: Algorithm> Ratelimited<S, A>
+pub struct RatelimitedSink<Item, S: Sink<Item>, A: Algorithm<Instant>>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance,
+    <A as Algorithm<Instant>>::NegativeDecision: NonConformance<Instant>,
 {
-    /// Acquires a reference to the underlying sink that this combinator is pushing to.
+    inner: S,
+    state: State,
+    future: Ratelimit<A>,
+    _spoop: PhantomData<Item>,
+}
+
+impl<Item, S: Sink<Item>, A: Algorithm<Instant>> RatelimitedSink<Item, S, A>
+where
+    <A as Algorithm<Instant>>::NegativeDecision: NonConformance<Instant>,
+{
+    fn new(
+        inner: S,
+        limiter: DirectRateLimiter<A, clock::MonotonicClock>,
+    ) -> RatelimitedSink<Item, S, A> {
+        let future = Ratelimit::new(limiter);
+        RatelimitedSink {
+            inner,
+            future,
+            state: State::NotReady,
+            _spoop: PhantomData,
+        }
+    }
+
+    /// Acquires a reference to the underlying sink that this combinator is sending into.
     pub fn get_ref(&self) -> &S {
         &self.inner
     }
 
-    /// Acquires a mutable reference to the underlying sink that this combinator is pushing to.
+    /// Acquires a mutable reference to the underlying sink that this combinator is sending into.
     pub fn get_mut(&mut self) -> &mut S {
         &mut self.inner
     }
 
-    /// Consumes this combinator, returning the underlying sink and any item
-    /// which has already been accepted by the combinator (i.e. passed the
-    /// limiter) but not yet by the underlying sink.
-    pub fn into_inner(self) -> (S, Option<S::SinkItem>) {
-        (self.inner, self.buf)
+    /// Consumes this combinator, returning the underlying sink.
+    pub fn into_inner(self) -> S {
+        self.inner
     }
 }
 
-impl<S: Sink + Stream, A: Algorithm> Stream for Ratelimited<S, A>
+impl<S: Sink<Item>, A: Algorithm<Instant>, Item> Sink<Item> for RatelimitedSink<Item, S, A>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance,
+    <A as Algorithm<Instant>>::NegativeDecision: NonConformance<Instant>,
+    A: Unpin,
+    S: Unpin,
+    Item: Unpin,
+    <A as ratelimit_meter::algorithms::Algorithm<Instant>>::BucketState: std::marker::Unpin,
 {
-    type Item = S::Item;
     type Error = S::Error;
 
-    fn poll(&mut self) -> Poll<Option<S::Item>, S::Error> {
-        self.inner.poll()
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        loop {
+            match self.state {
+                State::NotReady => {
+                    let future = Pin::new(&mut self.future);
+                    match future.poll(cx) {
+                        Poll::Pending => {
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(_) => {
+                            self.state = State::Ready;
+                        }
+                    }
+                }
+                State::Ready => {
+                    self.future.restart();
+                    let inner = Pin::new(&mut self.inner);
+                    return inner.poll_ready(cx);
+                }
+            }
+        }
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Item) -> Result<(), Self::Error> {
+        match self.state {
+            State::NotReady => {
+                unreachable!("Protocol violation: should not start_send before we say we can");
+            }
+            State::Ready => {
+                self.state = State::NotReady;
+                let inner = Pin::new(&mut self.inner);
+                inner.start_send(item)
+            }
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let inner = Pin::new(&mut self.inner);
+        inner.poll_flush(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let inner = Pin::new(&mut self.inner);
+        inner.poll_close(cx)
     }
 }
 
-impl<S: Sink, A: Algorithm> Sink for Ratelimited<S, A>
-where
-    <A as Algorithm>::NegativeDecision: NonConformance,
-    <S as Sink>::SinkError: From<io::Error>,
-{
-    type SinkItem = S::SinkItem;
-    type SinkError = S::SinkError;
-
-    fn start_send(&mut self, item: S::SinkItem) -> StartSend<S::SinkItem, S::SinkError> {
-        if self.buf.is_some() {
-            // Internal buffer full, try to flush it
-            self.poll_complete()?;
-
-            if self.buf.is_some() {
-                // Internal buffer still full, time to wait
-                return Ok(AsyncSink::NotReady(item));
-            }
-        }
-
-        // Check the limiter
-        if let Async::NotReady = self.ratelimit.poll()? {
-            return Ok(AsyncSink::NotReady(item));
-        }
-
-        // We're good to go, accept the item
-        // It'll be flushed to the underlying sink when `poll_complete` is called
-        self.buf = Some(item);
-        // and reset the limiter future for the next item
-        self.ratelimit.restart();
-
-        Ok(AsyncSink::Ready)
-    }
-
-    fn poll_complete(&mut self) -> Poll<(), S::SinkError> {
-        if let Some(item) = self.buf.take() {
-            if let AsyncSink::NotReady(item) = self.inner.start_send(item)? {
-                self.buf = Some(item);
-                return Ok(Async::NotReady);
-            }
-        }
-
-        self.inner.poll_complete()
-    }
-
-    fn close(&mut self) -> Poll<(), S::SinkError> {
-        self.inner.close()
-    }
-}
+// TODO: Implement Stream for any sinks that also implement Stream.

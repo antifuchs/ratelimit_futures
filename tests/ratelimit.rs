@@ -1,12 +1,11 @@
-use futures::prelude::*;
-use futures::stream;
+//use futures::stream;
+use futures::sink::SinkExt;
 use nonzero_ext::nonzero;
-//use ratelimit_futures::sink::SinkExt;
+use ratelimit_futures::sink::SinkExt as FuturesSinkExt;
 //use ratelimit_futures::stream::StreamExt;
 use futures::executor::block_on;
 use ratelimit_futures::{Jitter, Ratelimit};
 use ratelimit_meter::{DirectRateLimiter, LeakyBucket};
-use std::io;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -91,7 +90,7 @@ fn jitters() {
 fn stream() {
     let i = Instant::now();
     let lim = DirectRateLimiter::<LeakyBucket>::per_second(nonzero!(10u32));
-    let mut stream = stream::repeat::<_, io::Error>(()).ratelimit(lim).wait();
+    let mut stream = stream::repeat(()).ratelimit(lim).wait();
 
     for _ in 0..10 {
         stream.next().unwrap().unwrap();
@@ -106,27 +105,28 @@ fn stream() {
     assert!(i.elapsed() > Duration::from_millis(200));
     assert!(i.elapsed() <= Duration::from_millis(300));
 }
+*/
 
 #[test]
 fn sink() {
     let i = Instant::now();
     let lim = DirectRateLimiter::<LeakyBucket>::per_second(nonzero!(10u32));
-    let mut sink = Vec::new()
-        .sink_map_err::<_, io::Error>(|()| unreachable!())
-        .sink_ratelimit(lim)
-        .wait();
+    let mut sink = Vec::new().sink_ratelimit(lim);
 
     for _ in 0..10 {
-        sink.send(()).unwrap();
+        block_on(sink.send(())).unwrap();
     }
     assert!(i.elapsed() <= Duration::from_millis(100));
 
-    sink.send(()).unwrap();
-    assert!(i.elapsed() > Duration::from_millis(100));
+    block_on(sink.send(())).unwrap();
+    assert!(
+        i.elapsed() > Duration::from_millis(100),
+        "elapsed: {:?}",
+        i.elapsed()
+    );
     assert!(i.elapsed() <= Duration::from_millis(200));
 
-    sink.send(()).unwrap();
+    block_on(sink.send(())).unwrap();
     assert!(i.elapsed() > Duration::from_millis(200));
     assert!(i.elapsed() <= Duration::from_millis(300));
 }
-*/
