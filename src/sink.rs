@@ -2,6 +2,7 @@
 
 use crate::Ratelimit;
 use futures::sink::Sink;
+use futures::Stream;
 use ratelimit_meter::{algorithms::Algorithm, clock, DirectRateLimiter, NonConformance};
 use std::future::Future;
 use std::marker::PhantomData;
@@ -149,4 +150,23 @@ where
     }
 }
 
-// TODO: Implement Stream for any sinks that also implement Stream.
+impl<Item, S: Stream + Sink<Item>, A: Algorithm<Instant>> Stream for RatelimitedSink<Item, S, A>
+where
+    <A as Algorithm>::NegativeDecision: NonConformance,
+    A: Unpin,
+    S::Item: Unpin,
+    S: Unpin,
+    Item: Unpin,
+    <A as ratelimit_meter::algorithms::Algorithm<Instant>>::BucketState: std::marker::Unpin,
+{
+    type Item = <S as Stream>::Item;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let inner = Pin::new(&mut self.inner);
+        inner.poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
