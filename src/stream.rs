@@ -1,9 +1,13 @@
 //! Rate-limiting combinator for streams.
 
 use crate::Ratelimit;
-use futures::{try_ready, Async, Future, Poll, Sink, StartSend, Stream};
+use futures::future::Future;
+use futures::sink::Sink;
+use futures::stream::Stream;
 use ratelimit_meter::{algorithms::Algorithm, DirectRateLimiter, NonConformance};
-use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Instant;
 
 pub trait StreamExt: Stream {
     /// Limits the rate at which the stream produces items.
@@ -13,41 +17,52 @@ pub trait StreamExt: Stream {
     /// The combinator will buffer at most one item in order to adhere to the
     /// given limiter. I.e. if it already has an item buffered and needs to wait
     /// it will not `poll` the underlying stream.
-    fn ratelimit<A: Algorithm>(self, limiter: DirectRateLimiter<A>) -> Ratelimited<Self, A>
+    fn ratelimit<A: Algorithm<Instant>>(
+        self,
+        limiter: DirectRateLimiter<A>,
+    ) -> Ratelimited<Self, A>
     where
         Self: Sized,
         <A as Algorithm>::NegativeDecision: NonConformance;
 }
 
 impl<S: Stream> StreamExt for S {
-    fn ratelimit<A: Algorithm>(self, limiter: DirectRateLimiter<A>) -> Ratelimited<Self, A>
+    fn ratelimit<A: Algorithm<Instant>>(self, limiter: DirectRateLimiter<A>) -> Ratelimited<Self, A>
     where
         Self: Sized,
-        <A as Algorithm>::NegativeDecision: NonConformance,
+        <A as Algorithm<Instant>>::NegativeDecision: NonConformance,
     {
         Ratelimited {
             inner: self,
             ratelimit: Ratelimit::new(limiter),
             buf: None,
+            state: State::NotReady,
         }
     }
+}
+
+#[derive(PartialEq, Debug)]
+enum State {
+    NotReady,
+    Ready,
 }
 
 /// A stream combinator which will limit the rate of items passing through.
 ///
 /// This is produced by the [StreamExt::ratelimit] method.
-pub struct Ratelimited<S: Stream, A: Algorithm>
+pub struct Ratelimited<S: Stream, A: Algorithm<Instant>>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance,
+    <A as Algorithm<Instant>>::NegativeDecision: NonConformance<Instant>,
 {
     inner: S,
     ratelimit: Ratelimit<A>,
     buf: Option<S::Item>,
+    state: State,
 }
 
-impl<S: Stream, A: Algorithm> Ratelimited<S, A>
+impl<S: Stream, A: Algorithm<Instant>> Ratelimited<S, A>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance,
+    <A as Algorithm<Instant>>::NegativeDecision: NonConformance<Instant>,
 {
     /// Acquires a reference to the underlying stream that this combinator is pulling from.
     pub fn get_ref(&self) -> &S {
@@ -67,52 +82,74 @@ where
     }
 }
 
-impl<S: Stream, A: Algorithm> Stream for Ratelimited<S, A>
+impl<S: Stream, A: Algorithm<Instant>> Stream for Ratelimited<S, A>
 where
-    <A as Algorithm>::NegativeDecision: NonConformance,
-    <S as Stream>::Error: From<io::Error>,
+    <A as Algorithm<Instant>>::NegativeDecision: NonConformance<Instant>,
+    A: Unpin,
+    S: Unpin,
+    S::Item: Unpin,
+    <A as ratelimit_meter::algorithms::Algorithm<Instant>>::BucketState: std::marker::Unpin,
 {
     type Item = S::Item;
-    type Error = S::Error;
 
-    fn poll(&mut self) -> Poll<Option<S::Item>, S::Error> {
-        // Unless we've already got an item in our buffer,
-        if self.buf.is_none() {
-            // poll the underlying stream for the next one
-            self.buf = try_ready!(self.inner.poll());
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match self.state {
+                State::NotReady => {
+                    let limit = Pin::new(&mut self.ratelimit);
+                    match limit.poll(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(_) => {
+                            self.state = State::Ready;
+                        }
+                    }
+                }
+                State::Ready => {
+                    self.ratelimit.restart();
+                    let inner = Pin::new(&mut self.inner);
+                    match inner.poll_next(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(x) => {
+                            self.state = State::NotReady;
+                            return Poll::Ready(x);
+                        }
+                    }
+                }
+            }
         }
+    }
 
-        if self.buf.is_none() {
-            // End of stream, no need to query the limiter
-            return Ok(Async::Ready(None));
-        }
-
-        // Wait until we're good to go
-        try_ready!(self.ratelimit.poll());
-
-        // Once we have produced an item, reset the limiter future
-        self.ratelimit.restart();
-
-        Ok(Async::Ready(self.buf.take()))
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 
-impl<S: Stream + Sink, A: Algorithm> Sink for Ratelimited<S, A>
+impl<Item, S: Stream + Sink<Item>, A: Algorithm<Instant>> Sink<Item> for Ratelimited<S, A>
 where
     <A as Algorithm>::NegativeDecision: NonConformance,
+    Ratelimited<S, A>: Unpin,
+    S: Unpin,
+    <A as ratelimit_meter::algorithms::Algorithm<Instant>>::BucketState: std::marker::Unpin,
 {
-    type SinkItem = S::SinkItem;
-    type SinkError = S::SinkError;
+    type Error = <S as Sink<Item>>::Error;
 
-    fn start_send(&mut self, item: S::SinkItem) -> StartSend<S::SinkItem, S::SinkError> {
-        self.inner.start_send(item)
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let inner = Pin::new(&mut self.inner);
+        inner.poll_ready(cx)
     }
 
-    fn poll_complete(&mut self) -> Poll<(), S::SinkError> {
-        self.inner.poll_complete()
+    fn start_send(mut self: Pin<&mut Self>, item: Item) -> Result<(), Self::Error> {
+        let inner = Pin::new(&mut self.inner);
+        inner.start_send(item)
     }
 
-    fn close(&mut self) -> Poll<(), S::SinkError> {
-        self.inner.close()
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let inner = Pin::new(&mut self.inner);
+        inner.poll_flush(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        let inner = Pin::new(&mut self.inner);
+        inner.poll_close(cx)
     }
 }

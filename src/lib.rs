@@ -58,7 +58,7 @@ use std::time::{Duration, Instant};
 
 mod jitter;
 pub mod sink;
-//pub mod stream;
+pub mod stream;
 
 pub use jitter::*;
 

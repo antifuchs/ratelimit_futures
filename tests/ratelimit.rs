@@ -1,9 +1,9 @@
-//use futures::stream;
+use futures::executor::block_on;
 use futures::sink::SinkExt;
+use futures::{stream, StreamExt};
 use nonzero_ext::nonzero;
 use ratelimit_futures::sink::SinkExt as FuturesSinkExt;
-//use ratelimit_futures::stream::StreamExt;
-use futures::executor::block_on;
+use ratelimit_futures::stream::StreamExt as OurStreamExt;
 use ratelimit_futures::{Jitter, Ratelimit};
 use ratelimit_meter::{DirectRateLimiter, LeakyBucket};
 use std::thread;
@@ -85,27 +85,25 @@ fn jitters() {
     );
 }
 
-/*
 #[test]
 fn stream() {
     let i = Instant::now();
     let lim = DirectRateLimiter::<LeakyBucket>::per_second(nonzero!(10u32));
-    let mut stream = stream::repeat(()).ratelimit(lim).wait();
+    let mut stream = stream::repeat(()).ratelimit(lim);
 
     for _ in 0..10 {
-        stream.next().unwrap().unwrap();
+        block_on(stream.next());
     }
     assert!(i.elapsed() <= Duration::from_millis(100));
 
-    stream.next().unwrap().unwrap();
+    block_on(stream.next());
     assert!(i.elapsed() > Duration::from_millis(100));
     assert!(i.elapsed() <= Duration::from_millis(200));
 
-    stream.next().unwrap().unwrap();
+    block_on(stream.next());
     assert!(i.elapsed() > Duration::from_millis(200));
     assert!(i.elapsed() <= Duration::from_millis(300));
 }
-*/
 
 #[test]
 fn sink() {
