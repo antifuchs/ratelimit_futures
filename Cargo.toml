@@ -24,6 +24,6 @@ tag-prefix = "v"
 
 [dependencies]
 futures = "0.1.25"
-ratelimit_meter = "4.0.1"
+ratelimit_meter = "5.0.0"
 futures-timer = "0.1.1"
 nonzero_ext = "0.2.0"
