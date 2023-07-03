@@ -6,3 +6,7 @@ that's compatible with tokio.
 
 See the [documentation](https://docs.rs/ratelimit_futures) for details
 and examples.
+
+## Status
+
+This project is archived and superseded by [governor](https://github.com/antifuchs/governor).
